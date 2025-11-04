@@ -1,0 +1,27 @@
+[project]
+name = "deepfake-detect"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "accelerate>=1.10.1",
+    "aifactory>=2.0.0",
+    "albumentations>=2.0.8",
+    "dlib>=20.0.0",
+    "evaluate>=0.4.6",
+    "matplotlib>=3.9.4",
+    "numpy==1.26.4",
+    "opencv-python-headless==4.10.0.82",
+    "pandas>=2.3.3",
+    "peft>=0.17.1",
+    "pillow>=11.3.0",
+    "scikit-learn==1.3.2",
+    "scipy==1.11.4",
+    "simplejson>=3.20.2",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "transformers>=4.30",
+    "trl>=0.24.0",
+    "wandb>=0.22.3",
+]

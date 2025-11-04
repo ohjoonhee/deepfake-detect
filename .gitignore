@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+
+# Outputs
+artifacts/
+outputs/
+output/
+
+
+# data
+data/
+
+# Submission playground
+submission/
+
+tmp/
+
+# Vscode
+.vscode/
+
+# wandb
+wandb/
