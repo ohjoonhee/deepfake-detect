@@ -1108,7 +1108,6 @@ dependencies = [
     { name = "albumentations" },
     { name = "bitsandbytes" },
     { name = "datasets" },
-    { name = "dlib" },
     { name = "evaluate" },
     { name = "matplotlib", version = "3.9.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "matplotlib", version = "3.10.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
@@ -1138,7 +1137,6 @@ requires-dist = [
     { name = "albumentations", specifier = ">=2.0.8" },
     { name = "bitsandbytes", specifier = ">=0.48.2" },
     { name = "datasets", specifier = "<4.0.0" },
-    { name = "dlib", specifier = ">=20.0.0" },
     { name = "evaluate", specifier = ">=0.4.6" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "mtcnn", specifier = ">=0.1.1" },
@@ -1166,12 +1164,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/17/4d/ac7ffa80c69ea1df3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/7a/cef76fd8438a42f96db64ddaa85280485a9c395e7df3db8158cfec1eee34/dill-0.3.8-py3-none-any.whl", hash = "sha256:c36ca9ffb54365bdd2f8eb3eff7d2a21237f8452b57ace88b1ac615b7e815bd7", size = 116252, upload-time = "2024-01-27T23:42:14.239Z" },
 ]
-
-[[package]]
-name = "dlib"
-version = "20.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/28/f4/f8949b18ec1df2ef05fc2ea1d1dd82ff2d050b8704b7d0d088017315c221/dlib-20.0.0.tar.gz", hash = "sha256:9ab6a6fe113cc36a20c3f611c57fa6a07f18d1169bd04efb85c32e21b23b7d2b", size = 3310015, upload-time = "2025-05-28T01:22:16.141Z" }
 
 [[package]]
 name = "docopt"
