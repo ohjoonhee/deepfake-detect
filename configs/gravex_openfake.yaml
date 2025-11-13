@@ -1,5 +1,5 @@
 # Model configs
-model_name_or_path: "Qwen/Qwen3-VL-2B-Instruct"
+model_name_or_path: "Qwen/Qwen3-VL-4B-Instruct"
 dtype: bfloat16
 use_peft: true
 lora_r: 64
@@ -13,14 +13,14 @@ dataset_config: ["no_period", "default", "default"]
 train_split: ["train", "train", "train"]
 eval_split: [0.01, 0.05, 0.2]
 degrade_fake: [false, true, true]
-num_proc_workers: 32
+num_proc_workers: 8
 # eval_split: test
 train_eval_split: 0.01
 max_pixels: 1310720 # 1280*32*32
 min_pixels: 262144 # 256*32*32
 
 # Training arguments
-output_dir: "./output/qwen3-vl-2b-instruct-lorar64-gravex-openfake-resz256"
+output_dir: "./output/qwen3-vl-4b-instruct-lorar64-gravex-openfake-fakedeg"
 # max_steps: 2000
 max_epochs: 3
 logging_steps: 10

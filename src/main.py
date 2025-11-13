@@ -370,6 +370,7 @@ def load_model_from_config(model_args: ModelConfig):
         model_args.model_name_or_path,
         trust_remote_code=True,
         dtype=model_args.dtype,
+        attn_implementation=model_args.attn_implementation,
     )
 
     # Peft config
@@ -426,36 +427,6 @@ def train():
     train_datasets = []
     eval_datasets = []
 
-    # for name, config, split in zip(
-    #     script_args.dataset_name, script_args.dataset_config or [None] * len(script_args.dataset_name), script_args.train_split or ["train"] * len(script_args.dataset_name)
-    # ):
-    #     print("Dataset name:", name)
-
-    #     train_dataset = load_dataset(name, config, split=split)
-
-    #     # Add dummy images column with Value("null") for compatibility with data collator
-    #     if "images" not in train_dataset.column_names:
-    #         train_dataset = train_dataset.add_column("images", [None] * len(train_dataset))
-    #         print("Train dataset after adding images column:", train_dataset)
-
-    #     if "prompt" not in train_dataset.column_names or "completion" not in train_dataset.column_names:
-    #         # Assume the dataset is classic image classification dataset with "image" and "label" columns
-    #         train_dataset = train_dataset.map(preprocess, num_proc=8, desc="Preprocessing dataset")
-
-    #     # Cast label column to ClassLabel before stratified split
-    #     if "label" in train_dataset.column_names and not isinstance(train_dataset.features["label"], datasets.ClassLabel):
-    #         train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
-
-    #     if script_args.train_eval_split is not None:
-    #         train_dataset, eval_dataset = train_dataset.train_test_split(test_size=script_args.train_eval_split, stratify_by_column="label").values()  # TODO: stratify?
-    #     else:
-    #         eval_dataset = None
-
-    #     print("Train dataset size:", train_dataset)
-    #     print("Eval dataset size:", eval_dataset)
-
-    #     train_datasets.append(train_dataset)
-    #     eval_datasets.append(eval_dataset)
 
     for name, config, train_split, eval_split, degrade in zip(
         script_args.dataset_name,
