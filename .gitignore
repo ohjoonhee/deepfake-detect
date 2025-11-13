@@ -18,6 +18,7 @@ output/
 
 # data
 data/
+data_*/
 
 # Submission playground
 submission/

@@ -1,15 +1,207 @@
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Any, Union
 
 from datasets import load_dataset
 from transformers import AutoProcessor, AutoConfig
 from trl import SFTTrainer, SFTConfig, TrlParser, ModelConfig
+from trl.trainer.sft_trainer import DataCollatorForVisionLanguageModeling
+
+# Need for custom data collator
+# from trl.data_utils import is_conversational, apply_chat_template, prepare_multimodal_messages
+from trl.data_utils import is_conversational, apply_chat_template
+from trl.trainer.utils import flush_left
+
+from qwen_vl_utils import process_vision_info
+import torch
+
+from itertools import takewhile
+
+import random
+import cv2
+from PIL import Image
+import io
+
+import datasets
 
 from transformers.integrations.integration_utils import is_wandb_available
 
 import numpy as np
 
+
 import evaluate
+
+
+def prepare_multimodal_messages(messages: list[dict[str, Any]], images: List, video: List) -> None:
+    """
+    Convert messages into a structured multimodal format if needed.
+
+    Each message's content is transformed from a raw string into a list of typed parts. The first user message is
+    prefixed with an image placeholder, while all other user and assistant messages are wrapped as text entries.
+
+    Args:
+        messages (`list[dict[str, Any]]`):
+            Messages with `"role"` and `"content"`. Content may be a raw string before transformation.
+        num_images (`int`):
+            Number of images to include in the first user message. This is used to determine how many image
+            placeholders to add.
+
+    Example:
+    ```python
+    # Input
+    [
+        {"role": "user", "content": "What's in this image?"},
+        {"role": "assistant", "content": "It looks like a cat."},
+    ]
+
+    # Output (num_images=1)
+    [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What's in this image?"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "It looks like a cat."}]},
+    ]
+    ```
+    """
+    image_included = False
+    for message in messages:
+        if message["role"] == "system":
+            if isinstance(message["content"], str):  # if already prepared, the content will be a list
+                message["content"] = [{"type": "text", "text": message["content"]}]
+        elif message["role"] == "user":
+            if isinstance(message["content"], str) and not image_included:
+                # placeholders = [{"type": "image"}] * num_images
+                placeholders = []
+                for img in images:
+                    placeholders.append({"type": "image", "image": img, "resized_height": 256, "resized_width": 256})
+                if video is not None:
+                    # Add video to the messages with proper video data
+                    frames = []  # TODO
+                    for frame in video.seek(0.0):
+                        frames.append(frame["data"])
+
+                    placeholders.append({"type": "video", "video": frames})
+                message["content"] = [*placeholders, {"type": "text", "text": message["content"]}]
+                image_included = True
+            elif isinstance(message["content"], str) and image_included:
+                message["content"] = [{"type": "text", "text": message["content"]}]
+        elif message["role"] == "assistant":
+            if isinstance(message["content"], str):
+                message["content"] = [{"type": "text", "text": message["content"]}]
+        else:
+            raise ValueError(f"Invalid role in message: {message['role']}. Expected 'user', 'assistant', or 'system'.")
+
+
+class MyDataCollator(DataCollatorForVisionLanguageModeling):
+    def _collate_prompt_completion(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.pad_to_multiple_of is not None:
+            raise NotImplementedError("Padding to a multiple of a value is not yet implemented for vision-language modeling and " "prompt-completion data yet.")
+        images = [example["images"] for example in examples]
+        videos = [example["video"] for example in examples] if "video" in examples[0] else None
+        # Transformers requires at least one image in the batch, otherwise it throws an error
+        if all(img_list == [] for img_list in images):
+            images = None
+        if is_conversational(examples[0]):  # conversational case
+            for example in examples:
+                images = example["images"] if example["images"] != None else []  # All datasets even video datasets should have images key for vision_dataset=True
+                video = example.get("video", None)
+                prepare_multimodal_messages(example["prompt"] + example["completion"], images, video)
+                # TODO: extract video frames and add to prompt, extract fps info and pass to processor
+                # frames = video.get_
+                # for content in example["prompt"]:
+                #     if content.get("role") == "user":
+                #         content = [
+                #             {
+                #                 "type": "video",
+                #                 "video": frames,
+                #             },
+                #         ] + [content]
+
+        processed_prompts = self.processor.apply_chat_template(
+            [example["prompt"] for example in examples],
+            tokenize=True,
+            add_generation_prompt=True,
+            continue_final_message=False,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+            # add_special_tokens=False,  # to avoid adding the BOS, twice see https://huggingface.co/blog/qgallouedec/gotchas-in-tokenizer-behavior#7-chat-template-and-tokenization-dont-compose-due-to-special-tokens
+        )
+
+        untokenized_prompts = self.processor.apply_chat_template(
+            [example["prompt"] for example in examples],
+            tokenize=False,
+            add_generation_prompt=True,
+            continue_final_message=False,
+        )
+
+        # Process completions
+        completions = []
+        for example, untokenized_prompt in zip(examples, untokenized_prompts):
+            prompt_completion = self.processor.apply_chat_template(
+                example["prompt"] + example["completion"],
+                # tools=tools,
+                tokenize=False,
+                **example.get("chat_template_kwargs", {}),
+                # **template_kwargs,
+            )
+
+            completion = prompt_completion[len(untokenized_prompt) :]
+            completions.append(completion)
+
+        processed_completions = self.processor(
+            text=completions,
+            padding=True,
+            padding_side="right",
+            return_tensors=self.return_tensors,
+            add_special_tokens=False,  # to avoid adding the BOS, twice see https://huggingface.co/blog/qgallouedec/gotchas-in-tokenizer-behavior#7-chat-template-and-tokenization-dont-compose-due-to-special-tokens
+        )
+
+        # Concatenate prompts and completions
+        prompt_ids, completion_ids = processed_prompts["input_ids"], processed_completions["input_ids"]
+        prompt_mask, completion_mask = processed_prompts["attention_mask"], processed_completions["attention_mask"]
+        input_ids = torch.cat((prompt_ids, completion_ids), dim=1)
+        attention_mask = torch.cat((prompt_mask, completion_mask), dim=1)
+        completion_mask = torch.cat((torch.zeros_like(prompt_mask), completion_mask), dim=1)
+        if "token_type_ids" in processed_prompts:  # special case for Gemma
+            prompt_token_type_ids = processed_prompts["token_type_ids"]
+            completion_token_type_ids = processed_completions["token_type_ids"]
+            token_type_ids = torch.cat((prompt_token_type_ids, completion_token_type_ids), dim=1)
+
+        # Flush left to reduce padding
+        if "token_type_ids" in processed_prompts:
+            attention_mask, input_ids, completion_mask, token_type_ids = flush_left(attention_mask, input_ids, completion_mask, token_type_ids)
+        else:
+            attention_mask, input_ids, completion_mask = flush_left(attention_mask, input_ids, completion_mask)
+
+        # Truncate if necessary
+        if self.max_length is not None:
+            input_ids = input_ids[:, : self.max_length]
+            attention_mask = attention_mask[:, : self.max_length]
+            completion_mask = completion_mask[:, : self.max_length]
+            if "token_type_ids" in processed_prompts:
+                token_type_ids = token_type_ids[:, : self.max_length]
+
+        # Create labels and mask padding tokens
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100
+        if self.completion_only_loss:
+            labels[completion_mask == 0] = -100
+
+        # Build the output dictionary
+        output = processed_prompts  # we take processed_prompts because it contains the images
+        output["input_ids"] = input_ids
+        output["attention_mask"] = attention_mask
+        output["labels"] = labels
+        if "token_type_ids" in processed_prompts:
+            output["token_type_ids"] = token_type_ids
+
+        # Save output to disk for debugging
+        # torch.save(output, "data_collator_output.pt")
+
+        # import sys
+
+        # sys.exit(0)
+
+        return output
 
 
 @dataclass
@@ -54,10 +246,10 @@ class ScriptArguments:
         default=None,
         metadata={"help": "Dataset split to use for evaluation. If `datasets` is provided, this will be ignored."},
     )
-    train_eval_split: Optional[float] = field(
-        default=None,
-        metadata={"help": "If specified, a portion of the training set will be set aside for evaluation."},
-    )
+    # train_eval_split: Optional[float] = field(
+    #     default=None,
+    #     metadata={"help": "If specified, a portion of the training set will be set aside for evaluation."},
+    # )
     max_pixels: Optional[int] = field(
         default=None,
         metadata={"help": "Maximum number of pixels for image resizing."},
@@ -82,6 +274,65 @@ class ScriptArguments:
             "https://github.com/huggingface/transformers/issues/22482#issuecomment-1595790992."
         },
     )
+    num_proc_workers: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of subprocesses to use for data processing. 0 means that the data will be loaded in the main process."},
+    )
+    degrade_fake: Optional[list[bool]] = field(
+        default=None,
+        metadata={"help": "A list of degradation types to apply to the images."},
+    )
+
+
+def estimate_blur_laplacian(img_np):
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+
+def degrade_image_to_match_laion5(img_pil, real_blur_vals, real_res_vals, noise_var=0.0005, jpeg_quality_range=(70, 95)):
+    """
+    Lightly degrades an image to mimic real training images' resolution and blur distribution.
+    """
+    # if seed is not None:
+    #     random.seed(seed)
+    #     np.random.seed(seed)
+
+    # === Step 1: Resize to match real training image resolution ===
+    if random.random() < 0.2:
+        target_h, target_w = random.choice(real_res_vals)
+        orig_w, orig_h = img_pil.size
+        orig_area = orig_w * orig_h
+        target_area = target_h * target_w
+        scale = (target_area / orig_area) ** 0.5
+        new_w = max(1, int(orig_w * scale))
+        new_h = max(1, int(orig_h * scale))
+
+        img_pil = img_pil.resize((new_w, new_h), Image.BILINEAR)
+    img_np = np.array(img_pil)
+
+    if random.random() < 0.2:
+        target_blur = np.random.choice(real_blur_vals)
+        blur_val = estimate_blur_laplacian(img_np)
+        if blur_val > target_blur * 1.2:
+            # GaussianBlur in OpenCV is highly optimized and releases the GIL
+            img_np = cv2.GaussianBlur(img_np, (0, 0), sigmaX=0.3, sigmaY=0.3)
+
+    if random.random() < 0.2:
+        # === Step 3: Add light Gaussian noise (OpenCV) ===
+        sigma = int(255 * (noise_var**0.5))
+        if sigma > 0:
+            noise = np.zeros_like(img_np, dtype=np.int16)
+            cv2.randn(noise, 0, sigma)  # in‑place Gaussian noise
+            img_np = cv2.add(img_np.astype(np.int16), noise, dtype=cv2.CV_8U)
+
+    if random.random() < 0.2:
+        # === Step 4: Mild JPEG compression ===
+        quality = np.random.randint(*jpeg_quality_range)
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        _, encimg = cv2.imencode(".jpg", img_np, encode_param)
+        img_np = cv2.imdecode(encimg, cv2.IMREAD_COLOR)
+
+    return Image.fromarray(img_np)
 
 
 def preprocess(example):
@@ -91,10 +342,6 @@ def preprocess(example):
     prompt = [
         {
             "role": "user",
-            # "content": [
-            #     {"type": "image", "image": example["image"]},
-            #     {"type": "text", "text": "Is this image real or fake? Answer with one word: Real or Fake."},
-            # ],
             "content": "Is this image real or fake? Answer with one word: Real or Fake.",
         },
     ]
@@ -102,20 +349,7 @@ def preprocess(example):
         {"role": "assistant", "content": f"{label}."},
     ]
 
-    # messages = [
-    #     {
-    #         "role": "user",
-    #         # "content": [
-    #         #     {"type": "image", "image": example["image"]},
-    #         #     {"type": "text", "text": "Is this image real or fake? Answer with one word: Real or Fake."},
-    #         # ],
-    #         "content": "Is this image real or fake? Answer with one word: Real or Fake.",
-    #     },
-    #     {"role": "assistant", "content": f"{label}."},
-    # ]
-
     return {"prompt": prompt, "completion": completion, "images": [example["image"]]}
-    # return {"messages": messages}
 
 
 def load_model_from_config(model_args: ModelConfig):
@@ -177,15 +411,119 @@ def train():
     model = load_model_from_config(model_args)
 
     # 3. Load dataset
-    train_dataset = load_dataset(script_args.dataset_name, split=script_args.train_split)
-    train_dataset = train_dataset.map(preprocess, batched=True, batch_size=8, num_proc=8, desc="Preprocessing dataset")
-    if script_args.train_eval_split is not None:
-        train_dataset, eval_dataset = train_dataset.train_test_split(test_size=script_args.train_eval_split, stratify_by_column="label").values()
-    else:
-        eval_dataset = None
+    # If dataset name is string, convert to list for uniform processing
+    if isinstance(script_args.dataset_name, str) or script_args.dataset_name is None:
+        script_args.dataset_name = [script_args.dataset_name]
 
-    print("Train dataset size:", train_dataset)
-    print("Eval dataset size:", eval_dataset)
+        # Assert that train_eval_split is only used when a single dataset is specified
+        if script_args.dataset_config is not None:
+            script_args.dataset_config = [script_args.dataset_config]
+
+        if script_args.train_split is not None:
+            script_args.train_split = [script_args.train_split]
+
+    train_datasets = []
+    eval_datasets = []
+
+    # for name, config, split in zip(
+    #     script_args.dataset_name, script_args.dataset_config or [None] * len(script_args.dataset_name), script_args.train_split or ["train"] * len(script_args.dataset_name)
+    # ):
+    #     print("Dataset name:", name)
+
+    #     train_dataset = load_dataset(name, config, split=split)
+
+    #     # Add dummy images column with Value("null") for compatibility with data collator
+    #     if "images" not in train_dataset.column_names:
+    #         train_dataset = train_dataset.add_column("images", [None] * len(train_dataset))
+    #         print("Train dataset after adding images column:", train_dataset)
+
+    #     if "prompt" not in train_dataset.column_names or "completion" not in train_dataset.column_names:
+    #         # Assume the dataset is classic image classification dataset with "image" and "label" columns
+    #         train_dataset = train_dataset.map(preprocess, num_proc=8, desc="Preprocessing dataset")
+
+    #     # Cast label column to ClassLabel before stratified split
+    #     if "label" in train_dataset.column_names and not isinstance(train_dataset.features["label"], datasets.ClassLabel):
+    #         train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+
+    #     if script_args.train_eval_split is not None:
+    #         train_dataset, eval_dataset = train_dataset.train_test_split(test_size=script_args.train_eval_split, stratify_by_column="label").values()  # TODO: stratify?
+    #     else:
+    #         eval_dataset = None
+
+    #     print("Train dataset size:", train_dataset)
+    #     print("Eval dataset size:", eval_dataset)
+
+    #     train_datasets.append(train_dataset)
+    #     eval_datasets.append(eval_dataset)
+
+    for name, config, train_split, eval_split, degrade in zip(
+        script_args.dataset_name,
+        script_args.dataset_config or [None] * len(script_args.dataset_name),
+        script_args.train_split or ["train"] * len(script_args.dataset_name),
+        script_args.eval_split or [None] * len(script_args.dataset_name),
+        script_args.degrade_fake or [True] * len(script_args.dataset_name),
+    ):
+        print("Dataset name:", name)
+
+        train_dataset = load_dataset(name, config, split=train_split)
+
+        # Apply degradation to fake images in training set
+        real_train_stats = np.load("asset/real_train_stats.npz")
+        real_blur_vals = real_train_stats["blur_vals"]
+        real_res_vals = real_train_stats["res_vals"]
+
+        # Cast label column to ClassLabel before stratified split
+        # if "label" in train_dataset.column_names and not isinstance(train_dataset.features["label"], datasets.ClassLabel):
+        train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+
+        def degrade_if_fake(example):
+            label = example["label"]
+            if label == 1:
+                imgs = []
+                for img in example["images"]:
+                    img = degrade_image_to_match_laion5(
+                        example["images"][0],
+                        real_blur_vals,
+                        real_res_vals,
+                    )
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="PNG", compress_level=1)
+                    imgs.append({"bytes": buffer.getvalue()})
+
+                example["images"] = imgs
+
+            return example
+
+        if degrade:
+            train_dataset = train_dataset.map(degrade_if_fake, num_proc=script_args.num_proc_workers, desc=f"Degrading fake images in train set: {name}")
+
+        if eval_split is not None:
+            if isinstance(eval_split, float):
+                train_dataset, eval_dataset = train_dataset.train_test_split(test_size=eval_split, stratify_by_column="label").values()  # TODO: stratify?
+            elif isinstance(eval_split, str):
+                eval_dataset = load_dataset(name, config, split=eval_split)
+                eval_dataset = eval_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+            else:
+                raise ValueError("eval_split must be either float or str")
+        # elif script_args.train_eval_split is not None:
+        #     train_dataset, eval_dataset = train_dataset.train_test_split(test_size=script_args.train_eval_split, stratify_by_column="label").values()  # TODO: stratify?
+        else:
+            eval_dataset = None
+
+        print(f"Train dataset {name} size:", train_dataset)
+        print(f"Eval dataset {name} size:", eval_dataset)
+
+        train_datasets.append(train_dataset)
+        eval_datasets.append(eval_dataset)
+
+    train_dataset = datasets.concatenate_datasets(train_datasets)
+    # train_dataset = train_dataset.shuffle(seed=42)  # Shuffle the concatenated dataset for better mixing
+
+    eval_datasets = [ds for ds in eval_datasets if ds is not None]
+    eval_dataset = datasets.concatenate_datasets(eval_datasets) if len(eval_datasets) > 0 else None
+
+    print("Final train dataset size:", train_dataset)
+    print("Final eval dataset size:", eval_dataset)
 
     # 4. Load evaluation metric
     def preprocess_logits_for_metrics(logits, labels):
@@ -225,7 +563,6 @@ def train():
             # Replace -100 in the preds as we can't decode them
             preds = np.where(preds != -100, preds, processor.tokenizer.pad_token_id)
             # preds = [p[len(i) :] for (p, i) in zip(preds, inputs)]
-            print(preds)
 
             # Decode generated summaries into text
             decoded_preds = processor.tokenizer.batch_decode(preds, skip_special_tokens=True)
@@ -235,9 +572,9 @@ def train():
             # Decode reference summaries into text
             decoded_labels = processor.tokenizer.batch_decode(labels, skip_special_tokens=True)
             # ROUGE expects a newline after each sentence
-            print("===== After Decoding =====")
-            print([len(i) for i in inputs])
-            print(decoded_preds)
+            # print("===== After Decoding =====")
+            # print([len(i) for i in inputs])
+            # print(decoded_preds)
             # decoded_preds = [pred.strip()[len(i) :] for (pred, i) in zip(decoded_preds, inputs)]
             decoded_preds = [pred.strip() for (pred) in decoded_preds]
 
@@ -246,14 +583,36 @@ def train():
             aggregator.add_batch(decoded_preds, decoded_labels)
 
             # Debug prints
-            print("Decoded preds:", decoded_preds)
-            print("Decoded labels:", decoded_labels)
+            # print("Decoded preds:", decoded_preds)
+            # print("Decoded labels:", decoded_labels)
 
             if compute_result:
                 return aggregator.compute()
 
     else:
         compute_metrics = None
+
+    # Decide whether to use completion-only loss: if not specified, then it is set to True if the dataset format
+    # is prompt-completion, and False if the dataset format is language modeling.
+    dataset_sample = next(iter(train_dataset))
+    if training_args.completion_only_loss is None:
+        completion_only_loss = "prompt" in dataset_sample and "completion" in dataset_sample
+    else:
+        completion_only_loss = training_args.completion_only_loss
+
+    data_collator = MyDataCollator(
+        processor=processor,
+        max_length=training_args.max_length,
+        completion_only_loss=completion_only_loss,
+        pad_to_multiple_of=training_args.pad_to_multiple_of,
+        dataset_text_field=training_args.dataset_text_field,
+    )
+
+    # if training_args.dataset_kwargs is None:
+    #     training_args.dataset_kwargs = {}
+    # training_args.dataset_kwargs["skip_prepare_dataset"] = True  # We have already prepared the dataset
+
+    training_args.remove_unused_columns = False  # To avoid removing images column needed by the data collator
 
     # 4. Create Trainer
     trainer = SFTTrainer(
@@ -262,7 +621,8 @@ def train():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=processor,
-        compute_metrics=compute_metrics,
+        data_collator=data_collator,
+        # compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
@@ -276,7 +636,7 @@ def train():
 if __name__ == "__main__":
     import sys
 
-    sys.argv += ["--config", "configs/dev.yaml"]
+    sys.argv += ["--config", "configs/dev_collator.yaml"]
 
     if is_wandb_available():
         import os
