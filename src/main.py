@@ -70,7 +70,7 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: List, vi
                 # placeholders = [{"type": "image"}] * num_images
                 placeholders = []
                 for img in images:
-                    placeholders.append({"type": "image", "image": img, "resized_height": 256, "resized_width": 256})
+                    placeholders.append({"type": "image", "image": img})
                 if video is not None:
                     # Add video to the messages with proper video data
                     frames = []  # TODO
@@ -171,6 +171,7 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
             attention_mask, input_ids, completion_mask, token_type_ids = flush_left(attention_mask, input_ids, completion_mask, token_type_ids)
         else:
             attention_mask, input_ids, completion_mask = flush_left(attention_mask, input_ids, completion_mask)
+
 
         # Truncate if necessary
         if self.max_length is not None:
@@ -613,6 +614,9 @@ def train():
     # training_args.dataset_kwargs["skip_prepare_dataset"] = True  # We have already prepared the dataset
 
     training_args.remove_unused_columns = False  # To avoid removing images column needed by the data collator
+    training_args.max_length = None  # We handle max_length in the data collator
+    
+    print("========= Training starting... ========")
 
     # 4. Create Trainer
     trainer = SFTTrainer(
@@ -634,9 +638,9 @@ def train():
 
 
 if __name__ == "__main__":
-    import sys
+    # import sys
 
-    sys.argv += ["--config", "configs/dev_collator.yaml"]
+    # sys.argv += ["--config", "configs/dev_collator.yaml"]
 
     if is_wandb_available():
         import os
