@@ -534,7 +534,7 @@ def train():
         train_datasets.append(train_dataset)
         eval_datasets.append(eval_dataset)
 
-    train_dataset = datasets.interleave_datasets(train_datasets, probabilities=[0.1, 0.1, 0.8])  # Example probabilities
+    train_dataset = datasets.interleave_datasets(train_datasets)  
 
     eval_datasets = [ds for ds in eval_datasets if ds is not None]
     eval_dataset = datasets.interleave_datasets(eval_datasets) if len(eval_datasets) > 0 else None
@@ -680,6 +680,19 @@ def train():
     # if training_args.dataset_kwargs is None:
     #     training_args.dataset_kwargs = {}
     # training_args.dataset_kwargs["skip_prepare_dataset"] = True  # We have already prepared the dataset
+
+    try:
+        import accelerate
+        accelerator = accelerate.Accelerator()
+        
+        num_devices = max(1, accelerator.num_processes)
+    except ImportError:
+        num_devices = max(1, torch.cuda.device_count())
+    
+    # Calculate max_steps based on num_total_samples
+    max_steps = (script_args.num_total_samples // (training_args.per_device_train_batch_size * num_devices)) // training_args.gradient_accumulation_steps * training_args.num_train_epochs
+    training_args.max_steps = int(max_steps)
+
 
     training_args.remove_unused_columns = False  # To avoid removing images column needed by the data collator
     training_args.max_length = None  # We handle max_length in the data collator

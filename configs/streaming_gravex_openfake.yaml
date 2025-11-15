@@ -25,7 +25,6 @@ output_dir: "./output/qwen3-vl-4b-instruct-lorar64-gravex-openfake-fakedeg"
 # max_steps: 2000
 max_epochs: 3
 logging_steps: 10
-max_steps: 10000
 save_steps: 300
 save_total_limit: 10
 eval_steps: 300
