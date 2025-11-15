@@ -103,16 +103,6 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
                 images = example["images"] if example["images"] != None else []  # All datasets even video datasets should have images key for vision_dataset=True
                 video = example.get("video", None)
                 prepare_multimodal_messages(example["prompt"] + example["completion"], images, video)
-                # TODO: extract video frames and add to prompt, extract fps info and pass to processor
-                # frames = video.get_
-                # for content in example["prompt"]:
-                #     if content.get("role") == "user":
-                #         content = [
-                #             {
-                #                 "type": "video",
-                #                 "video": frames,
-                #             },
-                #         ] + [content]
 
         processed_prompts = self.processor.apply_chat_template(
             [example["prompt"] for example in examples],
@@ -171,7 +161,6 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
             attention_mask, input_ids, completion_mask, token_type_ids = flush_left(attention_mask, input_ids, completion_mask, token_type_ids)
         else:
             attention_mask, input_ids, completion_mask = flush_left(attention_mask, input_ids, completion_mask)
-
 
         # Truncate if necessary
         if self.max_length is not None:
@@ -347,7 +336,7 @@ def preprocess(example):
         },
     ]
     completion = [
-        {"role": "assistant", "content": f"{label}."},
+        {"role": "assistant", "content": f"{label}"},
     ]
 
     return {"prompt": prompt, "completion": completion, "images": [example["image"]]}
@@ -366,16 +355,37 @@ def load_model_from_config(model_args: ModelConfig):
     if model_class is None:
         raise ValueError(f"Model architecture {arch} not found in transformers library.")
     print(f"Loading model class: {model_class}")
+
+    # Quantization args
+    if model_args.load_in_4bit or model_args.load_in_8bit:
+        from transformers import BitsAndBytesConfig
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=model_args.load_in_4bit,
+            load_in_8bit=model_args.load_in_8bit,
+            bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
+            use_bnb_nested_quant=model_args.use_bnb_nested_quant,
+        )
+
+    else:
+        bnb_config = None
+
     model = model_class.from_pretrained(
         model_args.model_name_or_path,
         trust_remote_code=True,
         dtype=model_args.dtype,
         attn_implementation=model_args.attn_implementation,
+        quantization_config=bnb_config,
     )
 
     # Peft config
     if model_args.use_peft:
         from peft import get_peft_model, LoraConfig
+
+        if bnb_config is not None:
+            from peft import prepare_model_for_kbit_training
+
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)  # TODO: fix hardcoded False
 
         peft_config = LoraConfig(
             r=model_args.lora_r,
@@ -427,7 +437,6 @@ def train():
     train_datasets = []
     eval_datasets = []
 
-
     for name, config, train_split, eval_split, degrade in zip(
         script_args.dataset_name,
         script_args.dataset_config or [None] * len(script_args.dataset_name),
@@ -439,6 +448,35 @@ def train():
 
         train_dataset = load_dataset(name, config, split=train_split)
 
+        if "images" not in train_dataset.column_names and "image" in train_dataset.column_names:
+
+            def rename_image_column(example):
+                example["images"] = [example["image"]]
+                return example
+
+            train_dataset = train_dataset.map(rename_image_column, num_proc=script_args.num_proc_workers, remove_columns=["image"], desc="Renaming image column to images")
+
+        if "prompt" not in train_dataset.column_names:
+            prompt = [
+                {
+                    "role": "user",
+                    "content": "Is this image real or fake? Answer with one word: Real or Fake.",
+                },
+            ]
+            prompt_column = [prompt for _ in range(len(train_dataset))]
+            train_dataset = train_dataset.add_column("prompt", prompt_column)
+        if "completion" not in train_dataset.column_names:
+            completion_column = [
+                [
+                    {
+                        "role": "assistant",
+                        "content": "Fake" if label == 1 else "Real",
+                    }
+                ]
+                for label in train_dataset["label"]
+            ]
+            train_dataset = train_dataset.add_column("completion", completion_column)
+
         # Apply degradation to fake images in training set
         real_train_stats = np.load("asset/real_train_stats.npz")
         real_blur_vals = real_train_stats["blur_vals"]
@@ -446,7 +484,27 @@ def train():
 
         # Cast label column to ClassLabel before stratified split
         # if "label" in train_dataset.column_names and not isinstance(train_dataset.features["label"], datasets.ClassLabel):
-        train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+        try:
+            new_features = train_dataset.features.copy()
+            new_features["label"] = datasets.ClassLabel(num_classes=2, names=["Real", "Fake"])
+            # train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+            train_dataset = train_dataset.cast(new_features, writer_batch_size=100)
+        except Exception as e:
+            try:
+                print("Casting label column failed:", e)
+                # Add dummy row with Real label to avoid casting error
+                dummy_row = train_dataset[0].copy()
+                dummy_row["label"] = 0
+                dummy_features = train_dataset.features.copy()
+                dummy_row_ds = datasets.Dataset.from_dict({k: [v] for k, v in dummy_row.items()}, features=dummy_features)
+                train_dataset = datasets.concatenate_datasets([train_dataset, dummy_row_ds])
+                train_dataset = train_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+                # Remove dummy row after casting
+                train_dataset = train_dataset.select([list(range(len(train_dataset) - 1))])
+
+            except Exception as e2:
+                print("Second casting attempt failed:", e2)
+                raise e2
 
         def degrade_if_fake(example):
             label = example["label"]
@@ -471,10 +529,36 @@ def train():
 
         if eval_split is not None:
             if isinstance(eval_split, float):
-                train_dataset, eval_dataset = train_dataset.train_test_split(test_size=eval_split, stratify_by_column="label").values()  # TODO: stratify?
+                # if train_dataset ["label"] is datasets.ClassLabel, we can do stratified split
+                if "label" in train_dataset.column_names and isinstance(train_dataset.features["label"], datasets.ClassLabel):
+                    train_dataset, eval_dataset = train_dataset.train_test_split(test_size=eval_split, stratify_by_column="label").values()  # TODO: stratify?
+                else:
+                    train_dataset, eval_dataset = train_dataset.train_test_split(test_size=eval_split).values()
             elif isinstance(eval_split, str):
                 eval_dataset = load_dataset(name, config, split=eval_split)
                 eval_dataset = eval_dataset.cast_column("label", datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]))
+
+                # Add prompt and completion if not present
+                if "prompt" not in eval_dataset.column_names:
+                    prompt = [
+                        {
+                            "role": "user",
+                            "content": "Is this image real or fake? Answer with one word: Real or Fake.",
+                        },
+                    ]
+                    prompt_column = [prompt for _ in range(len(eval_dataset))]
+                    eval_dataset = eval_dataset.add_column("prompt", prompt_column)
+                if "completion" not in eval_dataset.column_names:
+                    completion_column = [
+                        [
+                            {
+                                "role": "assistant",
+                                "content": "Fake" if label == 1 else "Real",
+                            }
+                        ]
+                        for label in eval_dataset["label"]
+                    ]
+                    eval_dataset = eval_dataset.add_column("completion", completion_column)
             else:
                 raise ValueError("eval_split must be either float or str")
         # elif script_args.train_eval_split is not None:
@@ -586,7 +670,7 @@ def train():
 
     training_args.remove_unused_columns = False  # To avoid removing images column needed by the data collator
     training_args.max_length = None  # We handle max_length in the data collator
-    
+
     print("========= Training starting... ========")
 
     # 4. Create Trainer
