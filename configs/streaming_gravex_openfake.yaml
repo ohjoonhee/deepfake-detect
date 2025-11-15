@@ -8,12 +8,13 @@ lora_dropout: 0.05
 lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 # Scripts arguments
-dataset_name: ["ohjoonhee/GRAVEX-200k", "do0727/of_filtered"]
-dataset_config: ["no_period", "default"]
-train_split: ["train", "train"]
-eval_split: [0.01, 0.05]
-degrade_fake: [false, true]
+dataset_name: ["ohjoonhee/GRAVEX-200k", "ohjoonhee/Custom1-Degraded", "ohjoonhee/Sample-Fake-Videos-Conversation"]
+dataset_config: ["no_period", "default", "default"]
+train_split: ["train", "train", "train"]
+eval_split: [null, null, null]
+degrade_fake: [false, true, true]
 num_proc_workers: 8
+num_total_samples: 10000 # IMPORTANT: Must be set to enable streaming mode
 # eval_split: test
 train_eval_split: 0.01
 max_pixels: 1310720 # 1280*32*32
@@ -24,21 +25,22 @@ output_dir: "./output/qwen3-vl-4b-instruct-lorar64-gravex-openfake-fakedeg"
 # max_steps: 2000
 max_epochs: 3
 logging_steps: 10
+max_steps: 10000
 save_steps: 300
 save_total_limit: 10
 eval_steps: 300
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
-gradient_accumulation_steps: 4
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 1
 learning_rate: 1.0e-4
 lr_scheduler_type: "cosine"
 optim: "adamw_torch"
 warmup_ratio: 0.03
-report_to: "wandb"
-eval_strategy: "steps"
+report_to: "none"
+eval_strategy: "no"
 max_length: null
 bf16: true
 batch_eval_metrics: true
 include_inputs_for_metrics: true
-do_eval: true
+do_eval: false
 # can_return_loss: true
