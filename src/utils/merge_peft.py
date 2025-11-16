@@ -1,7 +1,7 @@
 from transformers import AutoModelForImageTextToText, AutoProcessor, AutoConfig
 from peft import PeftModel, PeftConfig
 
-model_path = "output/qwen3-vl-2b-instruct-lorar64-gravex-openfake-resz256/checkpoint-7800"
+model_path = "output/vast6000/checkpoint-32904"
 
 peft_config = PeftConfig.from_pretrained(model_path)
 

@@ -682,12 +682,11 @@ def train():
     # training_args.dataset_kwargs["skip_prepare_dataset"] = True  # We have already prepared the dataset
 
     try:
-        import accelerate
-        accelerator = accelerate.Accelerator()
-        
-        num_devices = max(1, accelerator.num_processes)
-    except ImportError:
         num_devices = max(1, torch.cuda.device_count())
+        print("Number of devices:", num_devices)
+    except ImportError:
+        num_devices = 1
+        print("Getting number of devices failed, defaulting to 1.")
     
     # Calculate max_steps based on num_total_samples
     max_steps = (script_args.num_total_samples // (training_args.per_device_train_batch_size * num_devices)) // training_args.gradient_accumulation_steps * training_args.num_train_epochs
