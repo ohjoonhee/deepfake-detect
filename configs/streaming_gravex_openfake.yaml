@@ -43,3 +43,7 @@ batch_eval_metrics: true
 include_inputs_for_metrics: true
 do_eval: false
 # can_return_loss: true
+# Data pipeline optimization configs
+dataloader_num_workers: 32
+dataloader_persistent_workers: True
+dataloader_pin_memory: True
