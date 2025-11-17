@@ -185,15 +185,7 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
         output["labels"] = labels
         if "token_type_ids" in processed_prompts:
             output["token_type_ids"] = token_type_ids
-        print("==== Data collator output shapes ====")
-        print("pixel_values:", output["pixel_values"].shape)
 
-        # Save output to disk for debugging
-        # torch.save(output, "data_collator_output.pt")
-
-        # import sys
-
-        # sys.exit(0)
 
         return output
 
