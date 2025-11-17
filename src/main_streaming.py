@@ -97,7 +97,6 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
         if self.pad_to_multiple_of is not None:
             raise NotImplementedError("Padding to a multiple of a value is not yet implemented for vision-language modeling and " "prompt-completion data yet.")
         images = [example["images"] for example in examples]
-        videos = [example["video"] for example in examples] if "video" in examples[0] else None
         # Transformers requires at least one image in the batch, otherwise it throws an error
         if all(img_list == [] for img_list in images):
             images = None
@@ -186,6 +185,8 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
         output["labels"] = labels
         if "token_type_ids" in processed_prompts:
             output["token_type_ids"] = token_type_ids
+        print("==== Data collator output shapes ====")
+        print("pixel_values:", output["pixel_values"].shape)
 
         # Save output to disk for debugging
         # torch.save(output, "data_collator_output.pt")
@@ -332,23 +333,6 @@ def degrade_image_to_match_laion5(img_pil, real_blur_vals, real_res_vals, noise_
     return Image.fromarray(img_np)
 
 
-# def preprocess(example):
-#     label_map = {0: "Fake", 1: "Real"}
-#     label = label_map[example["label"]]
-
-#     prompt = [
-#         {
-#             "role": "user",
-#             "content": "Is this image real or fake? Answer with one word: Real or Fake.",
-#         },
-#     ]
-#     completion = [
-#         {"role": "assistant", "content": f"{label}"},
-#     ]
-
-#     return {"prompt": prompt, "completion": completion, "images": [example["image"]]}
-
-
 def load_model_from_config(model_args: ModelConfig):
     config = AutoConfig.from_pretrained(model_args.model_name_or_path)
     print("Model config:", config)
@@ -479,8 +463,9 @@ def train():
 
             train_dataset = train_dataset.map(rename_image_column, remove_columns=["image"])
 
-        if "prompt" not in column_names:
-            train_dataset = train_dataset.add_column("prompt", [None] * MAX_SAMPLE_IN_DATASET)
+        if "prompt" in column_names:
+            train_dataset = train_dataset.remove_columns(["prompt"])
+        train_dataset = train_dataset.add_column("prompt", [None] * MAX_SAMPLE_IN_DATASET)
         if "completion" not in column_names:
             train_dataset = train_dataset.add_column("completion", [None] * MAX_SAMPLE_IN_DATASET)
         if "video" not in column_names:
@@ -534,7 +519,7 @@ def train():
         train_datasets.append(train_dataset)
         eval_datasets.append(eval_dataset)
 
-    train_dataset = datasets.interleave_datasets(train_datasets)  
+    train_dataset = datasets.interleave_datasets(train_datasets, stopping_strategy="all_exhausted_without_replacement")
 
     eval_datasets = [ds for ds in eval_datasets if ds is not None]
     eval_dataset = datasets.interleave_datasets(eval_datasets) if len(eval_datasets) > 0 else None
@@ -687,11 +672,10 @@ def train():
     except ImportError:
         num_devices = 1
         print("Getting number of devices failed, defaulting to 1.")
-    
+
     # Calculate max_steps based on num_total_samples
     max_steps = (script_args.num_total_samples // (training_args.per_device_train_batch_size * num_devices)) // training_args.gradient_accumulation_steps * training_args.num_train_epochs
     training_args.max_steps = int(max_steps)
-
 
     training_args.remove_unused_columns = False  # To avoid removing images column needed by the data collator
     training_args.max_length = None  # We handle max_length in the data collator
@@ -709,6 +693,14 @@ def train():
         # compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
+
+    # DEBUG
+    dl = trainer.get_train_dataloader()
+    e = next(iter(dl))
+    print("===== Sample batch from dataloader =====")
+    print(e["pixel_values"].shape)
+
+    # return
 
     # 5. Train
     trainer.train()

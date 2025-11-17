@@ -2,34 +2,35 @@
 model_name_or_path: "Qwen/Qwen3-VL-2B-Instruct"
 dtype: bfloat16
 use_peft: true
-lora_r: 64
-lora_alpha: 32
+lora_r: 128
+lora_alpha: 64
 lora_dropout: 0.05
 lora_target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 # Scripts arguments
-dataset_name: ["ohjoonhee/GRAVEX-200k", "ohjoonhee/Custom1-Degraded", "ohjoonhee/Sample-Fake-Videos-Conversation"]
-dataset_config: ["no_period", "default", "default"]
-train_split: ["train", "train", "train"]
-eval_split: [null, null, null]
-degrade_fake: [false, true, true]
+dataset_name: ["ohjoonhee/GRAVEX-200k"]
+dataset_config: ["no_period"]
+train_split: ["train"]
+eval_split: [null]
+degrade_fake: [false]
 num_proc_workers: 8
-num_total_samples: 10000 # IMPORTANT: Must be set to enable streaming mode
+num_total_samples: 700000 # IMPORTANT: Must be set to enable streaming mode
 # eval_split: test
 train_eval_split: 0.01
 max_pixels: 1310720 # 1280*32*32
 min_pixels: 262144 # 256*32*32
 
 # Training arguments
-output_dir: "./output/qwen3-vl-4b-instruct-lorar64-gravex-openfake-fakedeg"
+output_dir: "./output/qwen3-vl-2b-instruct-lorar128-gravex-openfake-fakedeg"
+run_name: "qwen3-vl-2b-instruct-lorar128-gravex-openfake-stream"
 # max_steps: 2000
-max_epochs: 3
+max_epochs: 1
 logging_steps: 10
 save_steps: 300
 save_total_limit: 10
 eval_steps: 300
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 4
 gradient_accumulation_steps: 1
 learning_rate: 1.0e-4
 lr_scheduler_type: "cosine"
@@ -42,8 +43,9 @@ bf16: true
 batch_eval_metrics: true
 include_inputs_for_metrics: true
 do_eval: false
+accelerator_config: {"split_batches": true}
 # can_return_loss: true
 # Data pipeline optimization configs
-dataloader_num_workers: 32
+dataloader_num_workers: 8
 dataloader_persistent_workers: True
 dataloader_pin_memory: True
