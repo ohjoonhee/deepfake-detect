@@ -522,7 +522,7 @@ def train():
     train_dataset = datasets.interleave_datasets(train_datasets, stopping_strategy="all_exhausted_without_replacement")
 
     eval_datasets = [ds for ds in eval_datasets if ds is not None]
-    eval_dataset = datasets.interleave_datasets(eval_datasets) if len(eval_datasets) > 0 else None
+    eval_dataset = datasets.interleave_datasets(eval_datasets, stopping_strategy="all_exhausted_without_replacement") if len(eval_datasets) > 0 else None
 
     # Apply degradation to fake images in training set
     real_train_stats = np.load("asset/real_train_stats.npz")
@@ -694,13 +694,6 @@ def train():
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
-    # DEBUG
-    dl = trainer.get_train_dataloader()
-    e = next(iter(dl))
-    print("===== Sample batch from dataloader =====")
-    print(e["pixel_values"].shape)
-
-    # return
 
     # 5. Train
     trainer.train()

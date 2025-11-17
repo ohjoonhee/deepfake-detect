@@ -43,7 +43,7 @@ bf16: true
 batch_eval_metrics: true
 include_inputs_for_metrics: true
 do_eval: false
-accelerator_config: {"split_batches": true}
+accelerator_config: {"split_batches": true, "dispatch_batches": false}
 # can_return_loss: true
 # Data pipeline optimization configs
 dataloader_num_workers: 8
