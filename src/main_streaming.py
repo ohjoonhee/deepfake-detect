@@ -16,9 +16,6 @@ from trl.trainer.utils import flush_left
 from qwen_vl_utils import process_vision_info
 import torch
 
-from transformers.video_utils import load_video
-
-from itertools import takewhile
 
 import random
 import cv2
@@ -28,6 +25,9 @@ import io
 import datasets
 
 from transformers.integrations.integration_utils import is_wandb_available
+
+import base64
+from torchcodec.decoders import VideoDecoder
 
 import numpy as np
 
@@ -77,10 +77,10 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: List, vi
                     placeholders.append({"type": "image", "image": img})
                 if video is not None:
                     # Add video to the messages with proper video data
-                    frames = video.get_frames_played_in_range(0.0, 5.0)  # TODO: parameterize
+                    total_num_frames = video.metadata.num_frames_from_content
+                    frames = video.get_frames_in_range(0, total_num_frames)
 
-                    video_obj, _ = load_video(frames.data, fps=video.metadata.average_fps_from_header)
-                    placeholders.append({"type": "video", "video": video_obj})
+                    placeholders.append({"type": "video", "video": frames.data})
                 message["content"] = [*placeholders, {"type": "text", "text": message["content"]}]
                 image_included = True
             elif isinstance(message["content"], str) and image_included:
@@ -93,6 +93,26 @@ def prepare_multimodal_messages(messages: list[dict[str, Any]], images: List, vi
 
 
 class MyDataCollator(DataCollatorForVisionLanguageModeling):
+    def __init__(
+        self,
+        processor: AutoProcessor,
+        max_length: Optional[int] = None,
+        completion_only_loss: bool = True,
+        pad_to_multiple_of: Optional[int] = None,
+        dataset_text_field: str = "text",
+        return_tensors: str = "pt",
+        script_args: Any = None,
+    ):
+        super().__init__(
+            processor=processor,
+            max_length=max_length,
+            completion_only_loss=completion_only_loss,
+            pad_to_multiple_of=pad_to_multiple_of,
+            dataset_text_field=dataset_text_field,
+            return_tensors=return_tensors,
+        )
+        self.script_args = script_args
+
     def _collate_prompt_completion(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         if self.pad_to_multiple_of is not None:
             raise NotImplementedError("Padding to a multiple of a value is not yet implemented for vision-language modeling and " "prompt-completion data yet.")
@@ -106,6 +126,7 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
                 video = example.get("video", None)
                 prepare_multimodal_messages(example["prompt"] + example["completion"], images, video)
 
+
         processed_prompts = self.processor.apply_chat_template(
             [example["prompt"] for example in examples],
             tokenize=True,
@@ -115,6 +136,8 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
             return_tensors="pt",
             padding=True,
             padding_side="left",
+            # fps=None,
+            # num_frames=self.script_args.video_num_frames,
             # add_special_tokens=False,  # to avoid adding the BOS, twice see https://huggingface.co/blog/qgallouedec/gotchas-in-tokenizer-behavior#7-chat-template-and-tokenization-dont-compose-due-to-special-tokens
         )
 
@@ -186,7 +209,6 @@ class MyDataCollator(DataCollatorForVisionLanguageModeling):
         if "token_type_ids" in processed_prompts:
             output["token_type_ids"] = token_type_ids
 
-
         return output
 
 
@@ -243,6 +265,18 @@ class ScriptArguments:
     min_pixels: Optional[int] = field(
         default=None,
         metadata={"help": "Minimum number of pixels for image resizing."},
+    )
+    video_max_pixels: Optional[int] = field(
+        default=None,
+        metadata={"help": "Maximum number of pixels for video resizing."},
+    )
+    video_min_pixels: Optional[int] = field(
+        default=None,
+        metadata={"help": "Minimum number of pixels for video resizing."},
+    )
+    video_num_frames: Optional[int] = field(
+        default=30,
+        metadata={"help": "Number of frames to sample from each video."},
     )
     dataset_streaming: bool = field(
         default=False,
@@ -402,6 +436,9 @@ def train():
     # 1. Load processor
     processor = AutoProcessor.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
     processor.image_processor.size = {"longest_edge": script_args.max_pixels, "shortest_edge": script_args.min_pixels}
+    processor.video_processor.size = {"longest_edge": script_args.video_max_pixels, "shortest_edge": script_args.video_min_pixels}
+    # processor.video_processor.fps = None
+    # processor.video_processor.num_frames = script_args.video_num_frames
 
     model = load_model_from_config(model_args)
 
@@ -425,7 +462,8 @@ def train():
             "prompt": datasets.List({"role": datasets.Value("string"), "content": datasets.Value("string")}),
             "completion": datasets.List({"role": datasets.Value("string"), "content": datasets.Value("string")}),
             "images": datasets.List(datasets.Image()),
-            "video": datasets.Video(),
+            # "video": datasets.Video(),
+            "video": datasets.Value("large_string"),  # base64 encoded video string
             "label": datasets.ClassLabel(num_classes=2, names=["Real", "Fake"]),
             "degrade_fake": datasets.Value("bool"),
         }
@@ -531,6 +569,14 @@ def train():
                 imgs.append(img)
             example["images"] = imgs
         else:  # Video case
+            if isinstance(example["video"], str):
+                # Assert the video is base64 encoded string
+                video_string = example["video"]
+                video_decoder = VideoDecoder(source=base64.b64decode(video_string.encode("utf-8")))
+                # def base64_to_bytes(encoded_str):
+                #     video_bytes = base64.b64decode(encoded_str.encode("utf-8"))
+                #     return video_bytes
+                example["video"] = video_decoder
             pass
 
         question_type = "image" if is_image else "video"
@@ -652,6 +698,7 @@ def train():
         completion_only_loss=completion_only_loss,
         pad_to_multiple_of=training_args.pad_to_multiple_of,
         dataset_text_field=training_args.dataset_text_field,
+        script_args=script_args,
     )
 
     # if training_args.dataset_kwargs is None:
@@ -686,7 +733,6 @@ def train():
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
-
     # 5. Train
     trainer.train()
 
@@ -695,10 +741,6 @@ def train():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.argv += ["--config", "configs/streaming_gravex_openfake.yaml"]
-
     if is_wandb_available():
         import os
 
